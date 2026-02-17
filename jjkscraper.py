@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import requests
 import img2pdf
@@ -19,108 +20,100 @@ from selenium.webdriver.support import expected_conditions as EC
 # SETTINGS
 SAVE_FOLDER = "JJK_Manga_Library"
 CHROME_PATH = "/usr/bin/google-chrome-stable"
-MAX_WORKERS = 20  # Number of simultaneous image downloads
+MAX_WORKERS = 10 
 
 def get_driver():
     options = uc.ChromeOptions()
     options.add_argument("--headless")
-    driver = uc.Chrome(options=options, browser_executable_path=CHROME_PATH)
-    return driver
+    return uc.Chrome(options=options, browser_executable_path=CHROME_PATH)
 
 def download_image(url, session):
-    """Helper for multithreaded downloading"""
     try:
         r = session.get(url, timeout=10)
-        if r.status_code == 200:
-            return r.content
-    except Exception:
+        return r.content if r.status_code == 200 else None
+    except:
         return None
 
 def download_chapter(url, chapter_name):
-    if not os.path.exists(SAVE_FOLDER):
-        os.makedirs(SAVE_FOLDER)
-    
+    if not os.path.exists(SAVE_FOLDER): os.makedirs(SAVE_FOLDER)
     filename = os.path.join(SAVE_FOLDER, f"{chapter_name}.pdf")
     
-    # AVOID REDOWNLOADING
+    # Check if exists before even starting driver
     if os.path.exists(filename):
-        print(f"[-] Skipping: {chapter_name} (Already exists)")
+        print(f"[-] Skipping: {chapter_name} (Exists)")
         return
 
-    print(f"[+] Starting: {chapter_name}")
+    print(f"[+] Downloading: {chapter_name}")
     driver = get_driver()
     try:
         driver.get(url)
-        # Wait for content to exist
-        WebDriverWait(driver, 15).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+        time.sleep(5)
         
-        # Faster dynamic scroll
-        last_height = driver.execute_script("return document.body.scrollHeight")
-        for i in range(1, last_height, 2000):
+        # Fast scroll
+        h = driver.execute_script("return document.body.scrollHeight")
+        for i in range(1, h, 2000):
             driver.execute_script(f"window.scrollTo(0, {i});")
             time.sleep(0.3)
 
         img_elements = driver.find_elements(By.CSS_SELECTOR, "img")
-        urls = []
-        for img in img_elements:
-            src = img.get_attribute("src")
-            if src and any(x in src for x in ["content", "uploads", "img"]):
-                urls.append(src)
+        urls = [img.get_attribute("src") for img in img_elements if img.get_attribute("src") and any(x in img.get_attribute("src") for x in ["content", "uploads", "img"])]
 
-        if not urls:
-            print(f"[!] No images found for {chapter_name}")
-            return
-
-        print(f"[*] Downloading {len(urls)} images in parallel...")
-        
-        # Multithreaded downloading
-        images_data = []
-        with requests.Session() as session:
-            session.headers.update({'User-Agent': 'Mozilla/5.0'})
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                results = list(executor.map(lambda u: download_image(u, session), urls))
-                images_data = [r for r in results if r is not None]
-
-        if images_data:
-            with open(filename, "wb") as f:
-                f.write(img2pdf.convert(images_data))
-            print(f"[SUCCESS] Saved: {filename}")
-    except Exception as e:
-        print(f"[ERROR] Failed {chapter_name}: {e}")
+        if urls:
+            with requests.Session() as s:
+                s.headers.update({'User-Agent': 'Mozilla/5.0'})
+                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as exe:
+                    results = list(exe.map(lambda u: download_image(u, s), urls))
+                    images_data = [r for r in results if r]
+            
+            if images_data:
+                with open(filename, "wb") as f:
+                    f.write(img2pdf.convert(images_data))
+                print(f"[SUCCESS] {chapter_name}")
     finally:
         driver.quit()
 
-def main():
-    manga_url = "https://read-jjk.com/"
-    print(f"Connecting to {manga_url} and indexing chapters...")
+def parse_selection(chapters_list, user_input):
+    """Handles the 34, 34:60, and 34:: logic"""
+    # Sort chapters so indexing matches series order (Chapter 1, 2, 3...)
+    # Assumes the site link contains the number, e.g., 'chapter-34'
+    chapters_list.sort(key=lambda x: float(''.join(filter(lambda c: c.isdigit() or c=='.', x[0].split('chapter-')[-1].split('/')[0]))))
     
+    # Extract just the numbers for comparison
+    nums = [float(''.join(filter(lambda c: c.isdigit() or c=='.', c[0].split('chapter-')[-1].split('/')[0]))) for c in chapters_list]
+
+    if "::" in user_input:
+        start = float(user_input.replace("::", ""))
+        return [c for i, c in enumerate(chapters_list) if nums[i] >= start]
+    elif ":" in user_input:
+        start, end = map(float, user_input.split(":"))
+        return [c for i, c in enumerate(chapters_list) if start <= nums[i] <= end]
+    else:
+        target = float(user_input)
+        return [c for i, c in enumerate(chapters_list) if nums[i] == target]
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage:\n  python script.py 34\n  python script.py 34:60\n  python script.py 34::")
+        return
+
+    user_arg = sys.argv[1]
+    manga_url = "https://read-jjk.com/"
+    
+    print("Indexing series structure...")
     driver = get_driver()
+    driver.get(manga_url)
+    links = driver.find_elements(By.TAG_NAME, "a")
+    all_chapters = list(dict.fromkeys([(l.get_attribute("href"), l.text.strip()) for l in links if l.get_attribute("href") and "chapter-" in l.get_attribute("href")]))
+    driver.quit()
+
     try:
-        driver.get(manga_url)
-        wait = WebDriverWait(driver, 20)
-        wait.until(EC.presence_of_element_located((By.TAG_NAME, "a")))
-        
-        links = driver.find_elements(By.TAG_NAME, "a")
-        chapters = []
-        for link in links:
-            href = link.get_attribute("href")
-            text = link.text.strip()
-            if href and "chapter-" in href and "read-jjk.com" in href:
-                chapters.append((href, text))
-        
-        chapters = list(dict.fromkeys(chapters))
-        driver.quit()
-        
-        print(f"Found {len(chapters)} chapters total.")
-        
-        # Process in reverse order (oldest to newest)
-        for url, title in reversed(chapters):
+        selected = parse_selection(all_chapters, user_arg)
+        print(f"Queueing {len(selected)} chapters.")
+        for url, title in selected:
             clean_name = title.replace(" ", "_").replace("/", "-")
             download_chapter(url, clean_name)
-
     except Exception as e:
-        print(f"Main Error: {e}")
-        if 'driver' in locals(): driver.quit()
+        print(f"Input Error: Ensure you used numbers correctly. {e}")
 
 if __name__ == "__main__":
     main()
