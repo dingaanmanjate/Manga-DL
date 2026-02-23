@@ -51,7 +51,7 @@ def download_image(url, session):
 
 def download_chapter(url, chapter_name):
     if not os.path.exists(SAVE_FOLDER): os.makedirs(SAVE_FOLDER)
-    filename = os.path.join(SAVE_FOLDER, f"{chapter_name}.pdf")
+    filename = os.path.join(SAVE_FOLDER, f"Jujutsu_Kaisen_{chapter_name}.pdf")
     
     # Check if exists before even starting driver
     if os.path.exists(filename):
